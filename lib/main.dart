@@ -55,14 +55,20 @@ class _HomePageState extends State<HomePage> {
   bool connecting = false;
   bool connected = false;
   // ====== [Config] 手感與上下限（方案 B）======
-  static const int kMinThrottle = 48; // 最小油門保護
+  static const int kMinThrottle = 0; // 最小油門保護
   static const int kMaxThrottle = 2047; // 最大油門
   static const int kTickMs = 20; // 計時器節拍 (ms)
   static const double kUnitsPerSecAtFull = 800; // 搖桿滿行程時每秒增減量
 
   // ====== [State] 變化率控制 ======
-  double _leftY = 0.0; // 左搖桿的 Y（-1..+1；上為負、下為正）
+  double _leftX = 0, _leftY = 0.0; // 左搖桿的 Y（-1..+1；上為負、下為正）
   Timer? _stickTimer; // 方案 B 連續更新的計時器
+  int _thrBase = 0;                // 集體油門基準（由上/下調）
+  static const int _yawMax = 500;  // 左右最大差速
+  double _rightX = 0, _rightY = 0;   // 右搖桿 [-1..1]，上推為負
+  static const int _rollMax  = 500;  // 右搖桿左右(roll)最大差
+  static const int _pitchMax = 500;  // 右搖桿前後(pitch)最大差
+
   // ====== Throttle ======
   int throttle = kMinThrottle; // 0..2047
   int _pending = 0; // 節流佇列
@@ -142,30 +148,75 @@ class _HomePageState extends State<HomePage> {
     if (_stickTimer != null) return;
 
     const tick = Duration(milliseconds: 30); // 送包節拍 ~33Hz
-    const deadzone = 0.03;                  // 小幅抖動時不動作
+    const dead = 0.03;                  // 小幅抖動時不動作
     const minStep = 2;                      // 最小步進
     const maxStep = 40;                     // 由搖桿位移放大到的額外步進上限
 
     _stickTimer = Timer.periodic(tick, (_) async {
-      final y = _leftY;                     // dy ∈ [-1, 1]；上推為負、下推為正
+      final lx = _leftX;   // 左搖桿 x：原地轉向（m1&m3 vs m2&m4）
+      final ly = _leftY;   // 左搖桿 y：集體油門
+      final rx = _rightX;  // 右搖桿 x：左右差速（m1&m2 vs m3&m4）
+      final ry = _rightY;  // 右搖桿 y：前後差速（m1&m4 vs m2&m3）
 
-      // 死區：太小就停止計時器
-      if (y.abs() < deadzone) {
+      // 四軸都在死區 → 停止
+      if (lx.abs() < dead && ly.abs() < dead && rx.abs() < dead && ry.abs() < dead) {
         _cancelStickTimer();
         return;
       }
 
-      // 上推(負) → 增加；下推(正) → 減少
-      final dir = (y < 0) ? 1 : -1;
+      // 1) 左搖桿 Y：調整集體油門基準 _thrBase（上推=負→增加）
+      var base = _thrBase;
+      if (ly.abs() >= dead) {
+        final dirY = (ly < 0) ? 1 : -1;
+        final step = (minStep + (ly.abs() * maxStep)).round();
+        base = clamp(base + dirY * step);
+        _thrBase = base;
+      }
 
-      // 依位移量調整步進（更用力推，變化更快）
-      final step = (minStep + (y.abs() * maxStep)).round();
+      // 2) 左搖桿 X：原地轉向（m1&m3 vs m2&m4），滿推差 _yawMax
+      int yaw = 0;
+      if (lx.abs() >= dead) yaw = (lx.abs() * _yawMax).round();
 
-      // 計算新油門並一次套用四路（_setAllThrottle 內含 clamp 規則）
-      final next = _m1 + dir * step;
-      _setAllThrottle(next);
+      // yaw 符號分配：
+      //  lx < 0（向左）：m2,m4 > m1,m3  → m1:-yaw, m2:+yaw, m3:-yaw, m4:+yaw
+      int yaw_m1 = 0, yaw_m2 = 0, yaw_m3 = 0, yaw_m4 = 0;
+      if (lx <= -dead) {
+        yaw_m1 = -yaw; yaw_m2 = yaw; yaw_m3 = -yaw; yaw_m4 = yaw;
+      } else if (lx >= dead) {
+        yaw_m1 = yaw; yaw_m2 = -yaw; yaw_m3 = yaw; yaw_m4 = -yaw;
+      }
 
-      // 送 20-byte 封包（此處預設 ARM，可依需求改 'D' 或 'S'）
+      // 3) 右搖桿 X：左右差速（m1&m2 vs m3&m4），滿推差 _rollMax
+      int roll = 0;
+      if (rx.abs() >= dead) roll = (rx.abs() * _rollMax).round();
+
+      // rx < 0（向左）：m1,m2 > m3,m4 → m1:+roll, m2:+roll, m3:-roll, m4:-roll
+      int roll_m1 = 0, roll_m2 = 0, roll_m3 = 0, roll_m4 = 0;
+      if (rx <= -dead) {
+        roll_m1 = roll; roll_m2 = roll; roll_m3 = -roll; roll_m4 = -roll;
+      } else if (rx >= dead) {
+        roll_m1 = -roll; roll_m2 = -roll; roll_m3 = roll; roll_m4 = roll;
+      }
+
+      // 4) 右搖桿 Y：前後差速（m1&m4 vs m2&m3），滿推差 _pitchMax
+      int pitch = 0;
+      if (ry.abs() >= dead) pitch = (ry.abs() * _pitchMax).round();
+
+      // ry < 0（向上）：m1,m4 > m2,m3 → m1:+pitch, m4:+pitch, m2:-pitch, m3:-pitch
+      int pitch_m1 = 0, pitch_m2 = 0, pitch_m3 = 0, pitch_m4 = 0;
+      if (ry <= -dead) {
+        pitch_m1 = pitch; pitch_m4 = pitch; pitch_m2 = -pitch; pitch_m3 = -pitch;
+      } else if (ry >= dead) {
+        pitch_m1 = -pitch; pitch_m4 = -pitch; pitch_m2 = pitch; pitch_m3 = pitch;
+      }
+
+      // 5) 合成四路
+      final a = clamp(base + yaw_m1 + roll_m1 + pitch_m1); // m1
+      final b = clamp(base + yaw_m2 + roll_m2 + pitch_m2); // m2
+      final c = clamp(base + yaw_m3 + roll_m3 + pitch_m3); // m3
+      final d = clamp(base + yaw_m4 + roll_m4 + pitch_m4); // m4
+
+      setState(() { _m1 = a; _m2 = b; _m3 = c; _m4 = d; });
       if (txChar != null) {
         await _send20BytePacket(_m1, _m2, _m3, _m4, 'A');
       }
@@ -405,18 +456,18 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Expanded(
                     child: Center(
-                      child: Joystick(
+                      child:Joystick(
                         size: 220,
+                        // verticalOnly: true, // NEW：只吃上下
                         onChanged: (dx, dy) {
-                          // 方案 B：改用變化率，不直接設定絕對油門
-                          setState(() { _leftY = dy; });
-                          if (_leftY.abs() < 1e-3) {
+                          setState(() { _leftX = dx;_leftY = -dy; });
+                          const dead = 0.03;
+                          if (_leftX.abs() < dead && _leftY.abs() < dead) {
                             _cancelStickTimer();
                           } else {
-                            _ensureStickTimer();
+                            _ensureStickTimer(); // 仍沿用你現在的變化率→四路同值邏輯
                           }
                         },
-
                         label: 'Left Stick',
                       ),
                     ),
@@ -426,8 +477,16 @@ class _HomePageState extends State<HomePage> {
                       child: Joystick(
                         size: 220,
                         onChanged: (dx, dy) {
-                          // 右手把：目前空著（保留未來功能）
-                          // 你要指派功能時，處理 dx/dy 即可
+                          setState(() {
+                            _rightX = dx;  // 左(負)／右(正)
+                            _rightY = -dy;  // 上(負)／下(正)
+                          });
+                          const dead = 0.03;
+                          if (_rightX.abs() < dead && _rightY.abs() < dead && _leftX.abs() < dead && _leftY.abs() < dead) {
+                            _cancelStickTimer();
+                          } else {
+                            _ensureStickTimer();
+                          }
                         },
                         label: 'Right Stick',
                       ),
@@ -453,6 +512,7 @@ class _HomePageState extends State<HomePage> {
                   OutlinedButton(
                     onPressed: () {
                       setState(() {
+                        _thrBase = 0;
                         _m1 = 0;
                         _m2 = 0;
                         _m3 = 0;
@@ -471,6 +531,7 @@ class _HomePageState extends State<HomePage> {
                   OutlinedButton(
                     onPressed: () {
                       setState(() {
+                        _thrBase = 2047;
                         _m1 = 2047;
                         _m2 = 2047;
                         _m3 = 2047;
@@ -498,114 +559,105 @@ class _HomePageState extends State<HomePage> {
 /// 簡易虛擬手把（不依賴外部套件）
 /// - 回傳 (dx, dy) ∈ [-1, 1]
 class Joystick extends StatefulWidget {
-  final double size;
-  final void Function(double dx, double dy) onChanged;
-  final String? label;
-
   const Joystick({
     super.key,
-    required this.size,
     required this.onChanged,
-    this.label,
+    this.size = 160,
+    this.verticalOnly = false, // NEW
+    this.label,                    // NEW
   });
+
+  final void Function(double dx, double dy) onChanged;
+  final double size;
+  final bool verticalOnly; // NEW
+  final String? label;             // NEW
 
   @override
   State<Joystick> createState() => _JoystickState();
 }
 
 class _JoystickState extends State<Joystick> {
-  Offset _pos = Offset.zero; // -1..1 範圍內的相對位置
+  Offset _knob = Offset.zero; // -1..1 範圍內的位移（x,y）
+
+  void _emit(Offset o) {
+    // 轉成 [-1,1]，上推 dy 應為負
+    double nx = o.dx;
+    double ny = o.dy;
+
+    if (widget.verticalOnly) nx = 0; // NEW: 鎖水平
+    widget.onChanged(nx, ny);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final outer = widget.size;
-    final knob = widget.size * 0.35;
-    final radius = (outer - knob) / 2;
+    final sz = widget.size;
+    final r = sz / 2;
 
-    Offset toUnit(Offset p) {
-      // 轉成 -1..1
-      final x = (p.dx / radius).clamp(-1.0, 1.0);
-      final y = (p.dy / radius).clamp(-1.0, 1.0);
-      return Offset(x, y);
-    }
-
-    Offset fromLocal(Offset local, Size size) {
-      final center = Offset(size.width / 2, size.height / 2);
-      return local - center;
-    }
-
-    Offset clampToCircle(Offset v, double r) {
-      final len = v.distance;
-      if (len <= r) return v;
-      final k = r / len;
-      return Offset(v.dx * k, v.dy * k);
-    }
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (widget.label != null)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8.0),
-            child: Text(
-              widget.label!,
-              style: const TextStyle(color: Colors.white70),
-            ),
-          ),
-        GestureDetector(
-          onPanStart: (d) {
-            final box = context.findRenderObject() as RenderBox;
-            final local = box.globalToLocal(d.globalPosition);
-            final p = fromLocal(local, box.size);
-            setState(() => _pos = clampToCircle(p, radius));
-            final u = toUnit(_pos);
-            widget.onChanged(u.dx, u.dy);
-          },
-          onPanUpdate: (d) {
-            final box = context.findRenderObject() as RenderBox;
-            final local = box.globalToLocal(d.globalPosition);
-            final p = fromLocal(local, box.size);
-            setState(() => _pos = clampToCircle(p, radius));
-            final u = toUnit(_pos);
-            widget.onChanged(u.dx, u.dy);
-          },
-          onPanEnd: (_) {
-            setState(() => _pos = Offset.zero);
-            widget.onChanged(0, 0);
-          },
-          child: Container(
-            width: outer,
-            height: outer,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: const RadialGradient(
-                colors: [Color(0xFF1B2330), Color(0xFF151A22)],
+    return GestureDetector(
+      onPanStart: (d) {
+        final local = (context.findRenderObject() as RenderBox)
+            .globalToLocal(d.globalPosition);
+        final center = Offset(sz / 2, sz / 2);
+        var v = (local - center) / r;         // 正規化到 [-1,1]
+        if (widget.verticalOnly) v = Offset(0, v.dy); // NEW
+        v = Offset(v.dx.clamp(-1, 1), v.dy.clamp(-1, 1));
+        setState(() => _knob = Offset(v.dx, v.dy));
+        _emit(Offset(v.dx, -v.dy)); // 讓上推為負 dy
+      },
+      onPanUpdate: (d) {
+        final local = (context.findRenderObject() as RenderBox)
+            .globalToLocal(d.globalPosition);
+        final center = Offset(sz / 2, sz / 2);
+        var v = (local - center) / r;
+        if (widget.verticalOnly) v = Offset(0, v.dy); // NEW
+        v = Offset(v.dx.clamp(-1, 1), v.dy.clamp(-1, 1));
+        setState(() => _knob = Offset(v.dx, v.dy));
+        _emit(Offset(v.dx, -v.dy));
+      },
+      onPanEnd: (_) {
+        setState(() => _knob = Offset.zero);
+        _emit(Offset.zero);
+      },
+      child: SizedBox(
+        width: sz,
+        height: sz,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // 背板
+            Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF161A22),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: const Color(0x22FFFFFF)),
               ),
-              border: Border.all(color: Colors.white12),
-              boxShadow: const [
-                BoxShadow(color: Colors.black54, blurRadius: 12),
-              ],
             ),
-            child: Center(
-              child: Transform.translate(
-                offset: _pos,
-                child: Container(
-                  width: knob,
-                  height: knob,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0xFF2C3545),
-                    border: Border.all(color: Colors.white24),
-                    boxShadow: const [
-                      BoxShadow(color: Colors.black87, blurRadius: 10),
-                    ],
-                  ),
+            // 十字盤（水平/垂直條）
+            // 即使 verticalOnly，也保留十字盤外觀（左右功能先不做）
+            Container(width: sz * 0.7, height: 4, color: const Color(0x33FFFFFF)),
+            Container(width: 4, height: sz * 0.7, color: const Color(0x33FFFFFF)),
+
+            // 位置刻度（中點）
+            Container(width: 6, height: 6, decoration: const BoxDecoration(
+                color: Color(0x55FFFFFF), shape: BoxShape.circle)),
+
+            // 搖桿頭
+            Transform.translate(
+              offset: Offset(_knob.dx * (r - 18), _knob.dy * (r - 18)),
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2A2F3A),
+                  shape: BoxShape.circle,
+                  boxShadow: const [BoxShadow(blurRadius: 8, color: Colors.black54)],
+                  border: Border.all(color: const Color(0x44FFFFFF)),
                 ),
               ),
             ),
-          ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }
