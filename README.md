@@ -21,7 +21,7 @@ android (joystick) ---(bt24 ble)--> f103 --(dshot)--> g431
 
 上/下：改變 _thrBase（集體油門）。
 
-左/右：原地轉向（m1&m3 vs m2&m4），滿推差 500（沿用你 _yawMax）。
+左/右：原地轉向（m1&m3 vs m2&m4），滿推差 500（ _yawMax）。
 
 右搖桿：
 
@@ -31,4 +31,4 @@ android (joystick) ---(bt24 ble)--> f103 --(dshot)--> g431
 
 四個通道最後合成後逐一 _clamp，確保 0/1/48/2047 規則一致。
 
-要把差速上限改小一點做細膩調整，只要調整 _rollMax/_pitchMax/_yawMax
+要把差速上限改小一點做調整，只要調整 _rollMax/_pitchMax/_yawMax
