@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:typed_data';
+import 'package:shared_preferences/shared_preferences.dart';
+
 
 /// BT24 (BLE UART) UUID —— 16-bit 擴展成 128-bit
 final bt24ServiceUuid = Guid("0000FFE0-0000-1000-8000-00805F9B34FB");
@@ -94,7 +96,28 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+// === Offsets（±500 可調）===
+  int _off1 = 0, _off2 = 0, _off3 = 0, _off4 = 0;
+  static const int _offMin = -500, _offMax = 500;
 
+  int _clampOffset(int v) => v.clamp(_offMin, _offMax);
+
+  Future<void> _loadOffsets() async {
+    final p = await SharedPreferences.getInstance();
+    setState(() {
+      _off1 = p.getInt('off_m1') ?? 0;
+      _off2 = p.getInt('off_m2') ?? 0;
+      _off3 = p.getInt('off_m3') ?? 0;
+      _off4 = p.getInt('off_m4') ?? 0;
+    });
+  }
+  Future<void> _saveOffsets() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('off_m1', _off1);
+    await p.setInt('off_m2', _off2);
+    await p.setInt('off_m3', _off3);
+    await p.setInt('off_m4', _off4);
+  }
 
 
 
@@ -141,6 +164,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    _loadOffsets();
     _ensurePermissions();
   }
 
@@ -211,10 +235,10 @@ class _HomePageState extends State<HomePage> {
       }
 
       // 5) 合成四路
-      final a = clamp(base + yaw_m1 + roll_m1 + pitch_m1); // m1
-      final b = clamp(base + yaw_m2 + roll_m2 + pitch_m2); // m2
-      final c = clamp(base + yaw_m3 + roll_m3 + pitch_m3); // m3
-      final d = clamp(base + yaw_m4 + roll_m4 + pitch_m4); // m4
+      final a = clamp(base + yaw_m1 + roll_m1 + pitch_m1 + _off1); // m1
+      final b = clamp(base + yaw_m2 + roll_m2 + pitch_m2 + _off2); // m2
+      final c = clamp(base + yaw_m3 + roll_m3 + pitch_m3 + _off3); // m3
+      final d = clamp(base + yaw_m4 + roll_m4 + pitch_m4 + _off4); // m4
 
       setState(() { _m1 = a; _m2 = b; _m3 = c; _m4 = d; });
       if (txChar != null) {
@@ -405,6 +429,19 @@ class _HomePageState extends State<HomePage> {
   void _snack(String s) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
   }
+  Future<void> _openOffsetPage() async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => OffsetPage(
+        m1: _off1, m2: _off2, m3: _off3, m4: _off4,
+        minV: _offMin, maxV: _offMax,
+        onSave: (a, b, c, d) async {
+          setState(() { _off1 = a; _off2 = b; _off3 = c; _off4 = d; });
+          await _saveOffsets();
+        },
+      ),
+    ));
+  }
+
 
   @override
   void dispose() {
@@ -546,6 +583,16 @@ class _HomePageState extends State<HomePage> {
                     child: const Text('MAX'),
                   ),
                   const Spacer(),
+
+                  OutlinedButton.icon(
+                    onPressed: _openOffsetPage,
+                    icon: const Icon(Icons.tune, size: 16, color: Colors.white70),
+                    label: const Text('Offsets', style: TextStyle(color: Colors.white70)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Colors.white24),
+                      foregroundColor: Colors.white70,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -656,6 +703,250 @@ class _JoystickState extends State<Joystick> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class OffsetPage extends StatefulWidget {
+  const OffsetPage({
+    super.key,
+    required this.m1, required this.m2, required this.m3, required this.m4,
+    required this.minV, required this.maxV,
+    required this.onSave,
+  });
+
+  final int m1, m2, m3, m4;
+  final int minV, maxV;
+  final void Function(int m1, int m2, int m3, int m4) onSave;
+
+  @override
+  State<OffsetPage> createState() => _OffsetPageState();
+}
+
+class _OffsetPageState extends State<OffsetPage> {
+  late int o1 = widget.m1,
+      o2 = widget.m2,
+      o3 = widget.m3,
+      o4 = widget.m4;
+
+  late final TextEditingController _c1;
+  late final TextEditingController _c2;
+  late final TextEditingController _c3;
+  late final TextEditingController _c4;
+
+  int _clp(int v) => v.clamp(widget.minV, widget.maxV);
+
+
+  @override
+  void initState() {
+    super.initState();
+    _c1 = TextEditingController(text: o1.toString());
+    _c2 = TextEditingController(text: o2.toString());
+    _c3 = TextEditingController(text: o3.toString());
+    _c4 = TextEditingController(text: o4.toString());
+  }
+
+  @override
+  void dispose() {
+    _c1.dispose(); _c2.dispose(); _c3.dispose(); _c4.dispose();
+    super.dispose();
+  }
+
+  // name: 'M1' ... 'M4'
+  // val : 目前值
+  // setV: 更新狀態 setState(() => o1 = v)
+  // ctrl: 對應文字框 controller（_c1.._c4）
+  Widget _row(String name, int val, void Function(int) setV, TextEditingController ctrl) {
+    void applyInt(int v) {
+      final nv = _clp(v);
+      setState(() {
+        setV(nv);
+        ctrl.text = nv.toString();
+      });
+      HapticFeedback.selectionClick();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+      child: Row(
+        children: [
+          SizedBox(width: 44, child: Text(name, style: const TextStyle(color: Colors.white))),
+
+          // 滑桿（連續，-500~500）
+          Expanded(
+            child: Slider(
+              value: val.toDouble(),
+              min: widget.minV.toDouble(),
+              max: widget.maxV.toDouble(),
+              divisions: 200, // 可調；200 ≈ 每格 5
+              label: '$val',
+              onChanged: (d) => applyInt(d.round()),
+            ),
+          ),
+
+          const SizedBox(width: 8),
+
+          // 直接輸入數字（±500），Enter 提交
+          SizedBox(
+            width: 76,
+            child: TextField(
+              controller: ctrl,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70),
+              keyboardType: const TextInputType.numberWithOptions(signed: true),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'^-?\d{0,4}$')),
+              ],
+              decoration: InputDecoration(
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                enabledBorder: OutlineInputBorder(
+                  borderSide: const BorderSide(color: Color(0x22FFFFFF)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: const BorderSide(color: Color(0x66FFFFFF)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              onSubmitted: (s) {
+                final v = int.tryParse(s);
+                if (v != null) applyInt(v);
+                else ctrl.text = val.toString();
+              },
+            ),
+          ),
+
+          // 一鍵歸零
+          IconButton(
+            tooltip: 'Reset to 0',
+            onPressed: () => applyInt(0),
+            icon: const Icon(Icons.restart_alt, color: Colors.white70, size: 20),
+            style: IconButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _stepBtn(String label, VoidCallback onTap) {
+    return OutlinedButton(
+      onPressed: onTap,
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Colors.white70,
+        side: const BorderSide(color: Colors.white24),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        minimumSize: const Size(0, 0),
+      ),
+      child: Text(label),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E1116),
+      resizeToAvoidBottomInset: true,
+      // 鍵盤彈出時自動推開內容
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E1116),
+        elevation: 0,
+        title: const Text(
+            'Motor Offsets', style: TextStyle(color: Colors.white)),
+        actions: [
+          TextButton(
+            onPressed: () {
+              setState(() {
+                o1 = 0;
+                o2 = 0;
+                o3 = 0;
+                o4 = 0;
+              });
+            },
+            child: const Text('Reset', style: TextStyle(color: Colors.white70)),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+
+// ===== OffsetPage.build 的 body 取代這段 =====
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isWide = constraints.maxWidth >= 520; // 寬螢幕並排、窄螢幕直排
+
+            Widget infoPanel() => Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0x181C1C1C),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0x22FFFFFF)),
+              ),
+              child: const Text(
+                '可對各馬達施加常數偏移 ±500\n'
+                    '最終輸出仍會被限制在 0–2047 。',
+                style: TextStyle(color: Colors.white54, height: 1.3),
+              ),
+            );
+
+            final leftColumn = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _row('M1', o1, (v) => o1 = v, _c1),
+                _row('M2', o2, (v) => o2 = v, _c2),
+                _row('M3', o3, (v) => o3 = v, _c3),
+                _row('M4', o4, (v) => o4 = v, _c4),
+              ],
+            );
+
+            final content = isWide
+                ? Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: leftColumn),
+                const SizedBox(width: 16),
+                SizedBox(width: 260, child: infoPanel()), // 右側說明
+              ],
+            )
+                : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                infoPanel(),
+                const SizedBox(height: 12),
+                leftColumn,
+              ],
+            );
+
+            return SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: content,
+              ),
+            );
+          },
+        ),
+      ),
+
+      // Save 固定在底部，不佔用可滾動區域的高度
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: () {
+                widget.onSave(o1, o2, o3, o4);
+                Navigator.pop(context);
+              },
+              child: const Text('Save'),
+            ),
+          ),
         ),
       ),
     );
